@@ -84,7 +84,12 @@ const checkTimeouts = async () => {
 
     if (incidentToNotify) {
       results.marked_down += 1;
-      await sendAlert(incidentToNotify);
+      try {
+        await sendAlert(incidentToNotify);
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error(`[discord-alert] timeout alert failed for node=${incidentToNotify.nodeId}: ${error.message}`);
+      }
     }
   }
 

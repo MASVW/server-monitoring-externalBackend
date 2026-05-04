@@ -137,7 +137,13 @@ const processHeartbeat = async ({ payload, receivedAt, ipAddress, userAgent }) =
   });
 
   if (incidentToNotify) {
-    await sendAlert(incidentToNotify);
+    try {
+      await sendAlert(incidentToNotify);
+    } catch (error) {
+      // Do not fail heartbeat ingestion due to outbound alert error.
+      // eslint-disable-next-line no-console
+      console.error(`[discord-alert] failed for node=${incidentToNotify.nodeId}: ${error.message}`);
+    }
   }
 
   return {

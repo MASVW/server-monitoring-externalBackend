@@ -11,6 +11,9 @@ const start = async () => {
 
     app.listen(env.app.port, () => {
       console.info(`External receiver listening on port ${env.app.port}`);
+      console.info(
+        `[discord-alert] enabled=${env.discord.enabled} configured=${Boolean(env.discord.botToken && env.discord.channelId)} interval=${env.discord.alertIntervalSeconds}s`
+      );
       startTimeoutChecker();
       startDiscordReminderJob();
     });

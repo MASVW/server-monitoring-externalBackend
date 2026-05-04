@@ -1,15 +1,21 @@
-# External Receiver (Server Monitoring)
+# External Receiver (Laravel 12)
 
-Backend service that receives signed heartbeat payloads from internal node(s), stores latest state in MySQL, evaluates timeout-based downtime, and exposes status/incident APIs.
+External monitoring receiver that accepts signed heartbeat payloads from internal nodes, stores latest state in MySQL, evaluates timeout incidents, and exposes status + incident APIs.
+
+## Repository Layout
+
+- Laravel app is at repository root.
+- Previous Node.js implementation is preserved in `/backup`.
 
 ## Requirements
 
-- Node.js 20+
+- PHP 8.3+
+- Composer 2+
 - MySQL 8+
 
 ## Setup
 
-1. Copy env template:
+1. Copy environment:
 
 ```bash
 cp .env.example .env
@@ -18,19 +24,25 @@ cp .env.example .env
 2. Install dependencies:
 
 ```bash
-npm install
+composer install
 ```
 
-3. Run migrations:
+3. Generate app key:
 
 ```bash
-npm run migrate
+php artisan key:generate
 ```
 
-4. Start service:
+4. Run migrations:
 
 ```bash
-npm run start
+php artisan migrate
+```
+
+5. Run locally:
+
+```bash
+php artisan serve --host=0.0.0.0 --port=${APP_PORT:-8000}
 ```
 
 ## Environment Variables
@@ -39,15 +51,16 @@ npm run start
 - `APP_ENV`
 - `DB_HOST`
 - `DB_PORT`
-- `DB_NAME`
-- `DB_USER`
+- `DB_DATABASE`
+- `DB_USERNAME`
 - `DB_PASSWORD`
 - `HEARTBEAT_HMAC_SECRET`
 - `HEARTBEAT_ALLOWED_DRIFT_SECONDS` (default `300`)
 - `HEARTBEAT_MAX_BODY_SIZE` (default `100kb`)
+- `HEARTBEAT_RATE_LIMIT_MAX` (default `120`)
 - `TIMEOUT_CHECKER_INTERVAL_SECONDS` (default `60`)
 - `ADMIN_API_TOKEN` (optional)
-- `DISCORD_ALERT_ENABLED` (default `false`)
+- `DISCORD_ALERT_ENABLED`
 - `DISCORD_BOT_TOKEN`
 - `DISCORD_CHANNEL_ID`
 - `DISCORD_ALERT_INTERVAL_SECONDS` (default `60`)
@@ -56,73 +69,118 @@ npm run start
 ## API Routes
 
 - `POST /api/v1/heartbeat`
-- `GET /api/v1/status/:nodeId`
+- `GET /api/v1/status/{nodeId}`
 - `GET /api/v1/admin/incidents`
 - `GET /health`
 
-## HMAC Signature (internal backend)
+## JSON Response Contract
 
-Signature string source:
+Success:
+
+```json
+{
+  "success": true,
+  "message": "...",
+  "data": {},
+  "meta": {}
+}
+```
+
+Error:
+
+```json
+{
+  "success": false,
+  "message": "...",
+  "error": "..."
+}
+```
+
+## HMAC Signature
+
+Signature source string:
 
 ```text
 raw_request_body + x-timestamp
 ```
 
-Signature algorithm:
+Algorithm:
 
 ```text
-HMAC SHA256 hex digest
+HMAC SHA256 (hex)
 ```
 
-Node.js example:
+PHP sender example:
 
-```js
-const crypto = require('crypto');
-
-const rawBody = JSON.stringify(payload);
-const timestamp = new Date().toISOString();
-const signature = crypto
-  .createHmac('sha256', process.env.HEARTBEAT_HMAC_SECRET)
-  .update(`${rawBody}${timestamp}`)
-  .digest('hex');
+```php
+$rawBody = json_encode($payload, JSON_UNESCAPED_SLASHES);
+$timestamp = gmdate('Y-m-d\\TH:i:s.000\\Z');
+$signature = hash_hmac('sha256', $rawBody.$timestamp, getenv('HEARTBEAT_HMAC_SECRET'));
 ```
 
-Headers to send:
+Headers:
 
 - `x-node-id`
 - `x-timestamp`
 - `x-signature`
 
-## Timeout Checker
-
-- Runs automatically with server startup.
-- Interval from `TIMEOUT_CHECKER_INTERVAL_SECONDS`.
-- Manual single run:
+## Example Heartbeat cURL
 
 ```bash
-npm run timeout:check
+TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
+BODY='{"node_id":"node-01","timestamp":"'"$TIMESTAMP"'","overall_status":"ok","host":{"cpu":{},"memory":{},"disk":{},"uptime":123456},"services":[{"name":"api-server","status":"online","pm_id":0,"restart_count":2,"cpu":0.5,"memory_mb":120.3}],"problems":[]}'
+SIGNATURE=$(php -r '$body=$argv[1];$ts=$argv[2];$secret=getenv("HEARTBEAT_HMAC_SECRET");echo hash_hmac("sha256", $body.$ts, $secret);' "$BODY" "$TIMESTAMP")
+
+curl -X POST "http://localhost:${APP_PORT:-8000}/api/v1/heartbeat" \
+  -H "Content-Type: application/json" \
+  -H "x-node-id: node-01" \
+  -H "x-timestamp: $TIMESTAMP" \
+  -H "x-signature: $SIGNATURE" \
+  -d "$BODY"
 ```
 
-## Discord Alerts
+## Operational Commands
 
-- Transition alerts are sent on status changes (`degraded`, `down`, `recovered`).
-- Reminder alerts are sent every `DISCORD_ALERT_INTERVAL_SECONDS` while node is `down`, `degraded`, or has non-`online` service states in the last summary.
-- Reminder runner also starts automatically with the server.
-- Manual single reminder run:
+Run timeout checker once:
 
 ```bash
-npm run discord:reminder:once
+php artisan monitor:check-timeouts
 ```
 
-## Quick Incident Flow
+Run Discord reminders once:
 
-1. Send heartbeat with status `ok`.
-2. Send heartbeat with status `degraded` from same node.
-3. Send heartbeat with status `ok` again.
-4. Stop heartbeat until threshold passes.
-5. Run checker or wait for interval.
+```bash
+php artisan monitor:send-discord-reminders
+```
+
+Send Discord test message:
+
+```bash
+php artisan monitor:discord-test
+```
+
+## Scheduler (cPanel)
+
+Use one cron entry:
+
+```bash
+* * * * * php /home/<user>/<app>/artisan schedule:run >> /dev/null 2>&1
+```
+
+Scheduled tasks:
+
+- `monitor:check-timeouts` every minute
+- `monitor:send-discord-reminders` every minute
+
+## Verify End-to-End Flow
+
+1. Send heartbeat with `overall_status=ok`.
+2. Send heartbeat with `overall_status=degraded`.
+3. Send heartbeat with `overall_status=ok` again.
+4. Stop heartbeat longer than timeout threshold.
+5. Run `php artisan monitor:check-timeouts` (or wait scheduler).
 6. Read incidents:
 
 ```bash
-curl "http://localhost:3000/api/v1/admin/incidents?node_id=node-01&page=1&limit=20"
+curl "http://localhost:${APP_PORT:-8000}/api/v1/admin/incidents?node_id=node-01&page=1&limit=20"
 ```

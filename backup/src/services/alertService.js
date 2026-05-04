@@ -101,8 +101,21 @@ const sendReminderAlert = async (node) => {
   return { sent: true };
 };
 
+const sendTestAlert = async () => {
+  const lines = [
+    '[Server Monitoring Test]',
+    'If you can read this, Discord bot delivery is working.',
+    `Time (UTC): ${new Date().toISOString()}`
+  ];
+
+  await postDiscordMessage(lines.join('\n'));
+  return { sent: true };
+};
+
 module.exports = {
   isDiscordConfigured,
+  postDiscordMessage,
   sendAlert,
-  sendReminderAlert
+  sendReminderAlert,
+  sendTestAlert
 };
