@@ -1,0 +1,28 @@
+{
+  "name": "external-server-receiver",
+  "version": "1.0.0",
+  "description": "External heartbeat receiver for server monitoring",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "migrate": "node src/database/migrate.js",
+    "migrate:undo": "node src/database/migrate.js --undo",
+    "timeout:check": "node src/jobs/runTimeoutCheckerOnce.js",
+    "discord:reminder:once": "node src/jobs/runDiscordReminderOnce.js",
+    "lint": "echo \"No lint configured\""
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
+    "mysql2": "^3.11.2",
+    "sequelize": "^6.37.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
