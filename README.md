@@ -98,24 +98,12 @@ Error:
 
 ## HMAC Signature
 
-Signature source string:
+External receiver now accepts two heartbeat contracts on the same endpoint `POST /api/v1/heartbeat`.
+
+1. Legacy contract
 
 ```text
 raw_request_body + x-timestamp
-```
-
-Algorithm:
-
-```text
-HMAC SHA256 (hex)
-```
-
-PHP sender example:
-
-```php
-$rawBody = json_encode($payload, JSON_UNESCAPED_SLASHES);
-$timestamp = gmdate('Y-m-d\\TH:i:s.000\\Z');
-$signature = hash_hmac('sha256', $rawBody.$timestamp, getenv('HEARTBEAT_HMAC_SECRET'));
 ```
 
 Headers:
@@ -124,7 +112,32 @@ Headers:
 - `x-timestamp`
 - `x-signature`
 
-## Example Heartbeat cURL
+2. Internal backend contract (`internalServer`)
+
+```text
+raw_request_body
+```
+
+Headers:
+
+- `x-heartbeat-node`
+- `x-heartbeat-signature`
+
+Algorithm for both:
+
+```text
+HMAC SHA256 (hex)
+```
+
+Legacy PHP sender example:
+
+```php
+$rawBody = json_encode($payload, JSON_UNESCAPED_SLASHES);
+$timestamp = gmdate('Y-m-d\\TH:i:s.000\\Z');
+$signature = hash_hmac('sha256', $rawBody.$timestamp, getenv('HEARTBEAT_HMAC_SECRET'));
+```
+
+## Example Heartbeat cURL (Legacy)
 
 ```bash
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
@@ -136,6 +149,19 @@ curl -X POST "http://localhost:${APP_PORT:-8000}/api/v1/heartbeat" \
   -H "x-node-id: node-01" \
   -H "x-timestamp: $TIMESTAMP" \
   -H "x-signature: $SIGNATURE" \
+  -d "$BODY"
+```
+
+## Example Heartbeat cURL (Internal Backend Contract)
+
+```bash
+BODY='{"type":"internal-server-heartbeat","generatedAt":"2026-05-05T10:00:00.000Z","node":"node-01","summary":{"overallStatus":"healthy","serviceCount":2,"healthyCount":2,"affectedCount":0,"affectedServices":[]},"services":[{"name":"api-server","status":"healthy","healthStatus":"healthy","pm_id":0,"restart_count":1,"cpu":0.5,"memory_mb":120.3}],"hostMetrics":{"cpu":{"loadPercent":11.2},"memory":{"usedPercent":34.1},"disk":[{"mount":"/","usedPercent":40.5}],"uptimeSeconds":123456,"hostname":"node-01","platform":"linux"},"connectivity":[],"incidents":{"open":[],"recent":[]}}'
+SIGNATURE=$(php -r '$body=$argv[1];$secret=getenv("HEARTBEAT_HMAC_SECRET");echo hash_hmac("sha256", $body, $secret);' "$BODY")
+
+curl -X POST "http://localhost:${APP_PORT:-8000}/api/v1/heartbeat" \
+  -H "Content-Type: application/json" \
+  -H "x-heartbeat-node: node-01" \
+  -H "x-heartbeat-signature: $SIGNATURE" \
   -d "$BODY"
 ```
 

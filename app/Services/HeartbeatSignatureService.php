@@ -22,6 +22,11 @@ class HeartbeatSignatureService
         return hash_hmac('sha256', $rawBody.$timestamp, $secret);
     }
 
+    public function computeBodySignature(string $rawBody, string $secret): string
+    {
+        return hash_hmac('sha256', $rawBody, $secret);
+    }
+
     public function verifyRequestSignature(string $rawBody, string $timestamp, ?string $signature, string $secret): array
     {
         if ($secret === '') {
@@ -33,6 +38,24 @@ class HeartbeatSignatureService
 
         $normalizedSignature = $this->normalizeSignature($signature);
         $expected = $this->computeSignature($rawBody, $timestamp, $secret);
+
+        return [
+            'ok' => hash_equals($expected, $normalizedSignature),
+            'expected' => $expected,
+        ];
+    }
+
+    public function verifyBodySignature(string $rawBody, ?string $signature, string $secret): array
+    {
+        if ($secret === '') {
+            return [
+                'ok' => false,
+                'reason' => 'HMAC secret is not configured',
+            ];
+        }
+
+        $normalizedSignature = $this->normalizeSignature($signature);
+        $expected = $this->computeBodySignature($rawBody, $secret);
 
         return [
             'ok' => hash_equals($expected, $normalizedSignature),

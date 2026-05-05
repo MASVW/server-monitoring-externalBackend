@@ -33,6 +33,21 @@ class HeartbeatSignatureServiceTest extends TestCase
         $this->assertFalse($result['ok']);
     }
 
+    public function test_body_signature_verification_accepts_plain_and_prefixed_signatures(): void
+    {
+        $service = new HeartbeatSignatureService();
+        $rawBody = '{"type":"internal-server-heartbeat"}';
+        $secret = 'test-secret';
+
+        $expected = $service->computeBodySignature($rawBody, $secret);
+
+        $plain = $service->verifyBodySignature($rawBody, $expected, $secret);
+        $prefixed = $service->verifyBodySignature($rawBody, 'sha256='.$expected, $secret);
+
+        $this->assertTrue($plain['ok']);
+        $this->assertTrue($prefixed['ok']);
+    }
+
     public function test_timestamp_drift_validation_rejects_far_old_timestamp(): void
     {
         config()->set('heartbeat.allowed_drift_seconds', 300);

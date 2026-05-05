@@ -105,4 +105,41 @@ class HeartbeatApiTest extends TestCase
             ->assertJsonPath('success', false)
             ->assertJsonPath('message', 'Node not found');
     }
+
+    public function test_accepts_internal_backend_heartbeat_contract(): void
+    {
+        $response = $this->sendInternalHeartbeat();
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('message', 'Heartbeat received')
+            ->assertJsonPath('data.node_id', 'node-01')
+            ->assertJsonPath('data.status', 'ok');
+
+        $this->assertDatabaseHas('monitored_nodes', [
+            'node_id' => 'node-01',
+            'current_status' => 'ok',
+        ]);
+
+        $this->assertDatabaseHas('heartbeat_events', [
+            'node_id' => 'node-01',
+            'status' => 'ok',
+            'signature_valid' => 1,
+        ]);
+    }
+
+    public function test_rejects_invalid_internal_backend_signature(): void
+    {
+        $response = $this->sendInternalHeartbeat(signature: 'bad-signature');
+
+        $response->assertStatus(401)
+            ->assertJsonPath('success', false)
+            ->assertJsonPath('message', 'Invalid heartbeat signature');
+
+        $this->assertDatabaseHas('heartbeat_events', [
+            'node_id' => 'node-01',
+            'status' => 'unknown',
+            'signature_valid' => 0,
+        ]);
+    }
 }

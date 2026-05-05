@@ -14,6 +14,23 @@ class StoreHeartbeatRequest extends FormRequest
 
     public function rules(): array
     {
+        if ($this->isInternalHeartbeat()) {
+            return [
+                'type' => ['required', 'string'],
+                'generatedAt' => ['required', 'string'],
+                'node' => ['required', 'string', 'max:120'],
+                'summary' => ['required', 'array'],
+                'summary.overallStatus' => ['required', 'string'],
+                'services' => ['required', 'array'],
+                'services.*.name' => ['required', 'string'],
+                'services.*.status' => ['sometimes', 'string'],
+                'services.*.healthStatus' => ['sometimes', 'string'],
+                'hostMetrics' => ['required', 'array'],
+                'connectivity' => ['sometimes', 'array'],
+                'incidents' => ['sometimes', 'array'],
+            ];
+        }
+
         return [
             'node_id' => ['required', 'string', 'max:120'],
             'timestamp' => ['required', 'string'],
@@ -28,5 +45,11 @@ class StoreHeartbeatRequest extends FormRequest
             'services.*.memory_mb' => ['nullable', 'numeric'],
             'problems' => ['sometimes', 'array'],
         ];
+    }
+
+    private function isInternalHeartbeat(): bool
+    {
+        return (string) $this->header('x-heartbeat-signature', '') !== ''
+            || $this->hasAny(['type', 'generatedAt', 'node']);
     }
 }
