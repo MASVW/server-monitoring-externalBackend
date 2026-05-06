@@ -106,7 +106,7 @@ class WhatsAppAlertServiceTest extends TestCase
         $secondRecovery = $this->service->sendRecoveryAlert($this->context(status: 'ok', summary: $this->healthySummary()));
 
         $this->assertFalse((bool) ($secondRecovery['sent'] ?? false));
-        $this->assertSame('no_active_incident', $secondRecovery['reason'] ?? null);
+        $this->assertSame('recovery_already_notified', $secondRecovery['reason'] ?? null);
 
         Http::assertSentCount(2);
     }

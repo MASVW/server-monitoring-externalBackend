@@ -151,12 +151,45 @@ class WhatsAppAlertService
         $now = CarbonImmutable::now('UTC');
         $state = $this->getStateForUpdate($prepared['node_id']);
 
-        if ($state === null || ! $this->isActiveIncident($state)) {
-            return ['sent' => false, 'reason' => 'no_active_incident'];
+        if ($state !== null && $state->recovery_notified_at !== null) {
+            return ['sent' => false, 'reason' => 'recovery_already_notified'];
         }
 
-        if ($state->recovery_notified_at !== null) {
-            return ['sent' => false, 'reason' => 'recovery_already_notified'];
+        if ($state === null || ! $this->isActiveIncident($state)) {
+            if (! in_array((string) ($prepared['previous_status'] ?? 'unknown'), ['down', 'degraded'], true)) {
+                return ['sent' => false, 'reason' => 'no_active_incident'];
+            }
+
+            $prepared['status'] = 'ok';
+            $prepared['incident_started_at'] = $prepared['incident_started_at'] ?? null;
+            $prepared['recovery_time'] = $now;
+
+            $message = $this->buildRecoveryMessage($prepared);
+            $sendResult = $this->sendFonnteMessage($message);
+
+            DB::transaction(function () use ($prepared, $now): void {
+                $record = MonitoringAlertState::query()->firstOrNew([
+                    'node_id' => $prepared['node_id'],
+                    'channel' => 'whatsapp',
+                ]);
+
+                $record->fill([
+                    'current_status' => 'ok',
+                    'incident_key' => $this->incidentKey($prepared['node_id']),
+                    'incident_started_at' => $record->incident_started_at,
+                    'last_alert_at' => $now,
+                    'recovered_at' => $now,
+                    'recovery_notified_at' => $now,
+                    'last_payload_json' => $this->sanitizePayloadForState($prepared),
+                ])->save();
+            });
+
+            return [
+                'sent' => true,
+                'channel' => 'whatsapp',
+                'type' => 'recovery',
+                'provider_response' => $sendResult,
+            ];
         }
 
         $prepared['status'] = 'ok';
