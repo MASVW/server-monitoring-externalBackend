@@ -905,7 +905,7 @@ class AlertService
 
     private function dispatchWhatsAppForTransition(array $payload, ?MonitoredNode $node, array $summary): array
     {
-        $status = $this->normalizeServiceBucket((string) ($payload['to_status'] ?? $node?->current_status ?? 'unknown'));
+        $status = $this->normalizeNodeStatusForIncident((string) ($payload['to_status'] ?? $node?->current_status ?? 'unknown'));
 
         $context = [
             'node_id' => (string) ($payload['node_id'] ?? $node?->node_id ?? 'unknown'),
@@ -927,5 +927,15 @@ class AlertService
         }
 
         return ['sent' => false, 'reason' => 'status_not_alertable'];
+    }
+
+    private function normalizeNodeStatusForIncident(string $status): string
+    {
+        return match (strtolower(trim($status))) {
+            'ok', 'online', 'healthy', 'running' => 'ok',
+            'degraded', 'warning' => 'degraded',
+            'down', 'offline', 'errored', 'stopped' => 'down',
+            default => 'unknown',
+        };
     }
 }
