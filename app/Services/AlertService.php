@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\MonitoredNode;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class AlertService
 {
@@ -30,6 +31,10 @@ class AlertService
 
     private const MAX_EMBED_FOOTER_CHARS = 2048;
 
+    public function __construct(
+        private readonly WhatsAppAlertService $whatsAppAlertService,
+    ) {}
+
     public function isDiscordConfigured(): bool
     {
         return config('discord.enabled')
@@ -39,17 +44,41 @@ class AlertService
 
     public function sendAlert(array $payload): array
     {
-        if (! $this->isDiscordConfigured()) {
-            return ['sent' => false, 'reason' => 'discord_not_configured'];
-        }
-
         $nodeId = (string) ($payload['node_id'] ?? 'unknown');
         $node = MonitoredNode::query()->where('node_id', $nodeId)->first();
         $summary = $this->resolveSummary($payload, $node);
 
-        $this->postDiscordEmbed($this->buildAlertEmbed($payload, $node, $summary));
+        $discordResult = ['sent' => false, 'reason' => 'discord_not_configured'];
+        if ($this->isDiscordConfigured()) {
+            try {
+                $this->postDiscordEmbed($this->buildAlertEmbed($payload, $node, $summary));
+                $discordResult = ['sent' => true];
+            } catch (\Throwable $exception) {
+                $discordResult = ['sent' => false, 'reason' => 'discord_send_failed'];
+                Log::error('Discord alert dispatch failed', [
+                    'node_id' => $nodeId,
+                    'error' => $exception->getMessage(),
+                ]);
+            }
+        }
 
-        return ['sent' => true];
+        $whatsAppResult = ['sent' => false, 'reason' => 'whatsapp_not_dispatched'];
+        try {
+            $whatsAppResult = $this->dispatchWhatsAppForTransition($payload, $node, $summary);
+        } catch (\Throwable $exception) {
+            Log::error('WhatsApp alert dispatch failed', [
+                'node_id' => $nodeId,
+                'error' => $exception->getMessage(),
+            ]);
+        }
+
+        return [
+            'sent' => (bool) ($discordResult['sent'] ?? false) || (bool) ($whatsAppResult['sent'] ?? false),
+            'channels' => [
+                'discord' => $discordResult,
+                'whatsapp' => $whatsAppResult,
+            ],
+        ];
     }
 
     public function sendReminderAlert(MonitoredNode $node): array
@@ -872,5 +901,31 @@ class AlertService
     private function clipFieldValue(string $value, ?int $max = null): string
     {
         return $this->clipText($value, $max ?? self::MAX_EMBED_FIELD_VALUE_CHARS);
+    }
+
+    private function dispatchWhatsAppForTransition(array $payload, ?MonitoredNode $node, array $summary): array
+    {
+        $status = $this->normalizeServiceBucket((string) ($payload['to_status'] ?? $node?->current_status ?? 'unknown'));
+
+        $context = [
+            'node_id' => (string) ($payload['node_id'] ?? $node?->node_id ?? 'unknown'),
+            'status' => $status,
+            'previous_status' => (string) ($payload['from_status'] ?? 'unknown'),
+            'summary' => $summary,
+            'timeout_threshold_seconds' => (int) ($node?->timeout_threshold_seconds ?? 180),
+            'last_heartbeat_at' => $node?->last_heartbeat_at,
+            'event_type' => (string) ($payload['event_type'] ?? 'unknown'),
+            'message' => (string) ($payload['message'] ?? ''),
+        ];
+
+        if (in_array($status, ['down', 'degraded'], true)) {
+            return $this->whatsAppAlertService->sendIncidentAlert($context);
+        }
+
+        if ($status === 'ok') {
+            return $this->whatsAppAlertService->sendRecoveryAlert($context);
+        }
+
+        return ['sent' => false, 'reason' => 'status_not_alertable'];
     }
 }
