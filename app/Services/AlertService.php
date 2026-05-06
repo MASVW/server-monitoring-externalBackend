@@ -100,8 +100,14 @@ class AlertService
         }
 
         $url = rtrim((string) config('discord.api_base_url'), '/').'/channels/'.config('discord.channel_id').'/messages';
+        $token = trim((string) config('discord.bot_token'));
 
-        $response = Http::withToken((string) config('discord.bot_token'))
+        // Discord bot REST API requires: Authorization: Bot <token>
+        if (str_starts_with(strtolower($token), 'bot ')) {
+            $token = trim(substr($token, 4));
+        }
+
+        $response = Http::withToken($token, 'Bot')
             ->acceptJson()
             ->post($url, [
                 'content' => $this->clip($content),
