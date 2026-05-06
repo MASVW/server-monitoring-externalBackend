@@ -21,14 +21,27 @@ class AlertService
             return ['sent' => false, 'reason' => 'discord_not_configured'];
         }
 
+        $nodeId = (string) ($payload['node_id'] ?? 'unknown');
+        $node = MonitoredNode::query()->where('node_id', $nodeId)->first();
+        $summary = $this->resolveSummary($payload, $node);
+
         $lines = [
             '[Server Monitoring Alert]',
-            'Node: '.$payload['node_id'],
-            'Type: '.$payload['event_type'],
-            'Status: '.($payload['from_status'] ?? 'unknown').' -> '.$payload['to_status'],
-            'Message: '.$payload['message'],
-            'Time (UTC): '.now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
+            'Node: '.$nodeId,
+            'Type: '.($payload['event_type'] ?? 'unknown'),
+            'Status: '.($payload['from_status'] ?? 'unknown').' -> '.($payload['to_status'] ?? 'unknown'),
+            'Message: '.($payload['message'] ?? '-'),
+            'Last Heartbeat (UTC): '.(DateFormatter::isoUtc($node?->last_heartbeat_at) ?? 'never'),
         ];
+
+        $lines = array_merge(
+            $lines,
+            $this->buildServiceDetailLines($summary),
+            $this->buildProblemLines($summary),
+            [
+            'Time (UTC): '.now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
+            ]
+        );
 
         $this->postDiscordMessage(implode("\n", $lines));
 
@@ -56,8 +69,16 @@ class AlertService
             'Last Heartbeat (UTC): '.(DateFormatter::isoUtc($node->last_heartbeat_at) ?? 'never'),
             'Timeout Threshold: '.$node->timeout_threshold_seconds.'s',
             'Potential Unhealthy Services: '.$downServices,
-            'Time (UTC): '.now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
         ];
+
+        $lines = array_merge(
+            $lines,
+            $this->buildServiceDetailLines($summary),
+            $this->buildProblemLines($summary),
+            [
+                'Time (UTC): '.now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
+            ]
+        );
 
         $this->postDiscordMessage(implode("\n", $lines));
 
@@ -91,6 +112,122 @@ class AlertService
         }
 
         return $count;
+    }
+
+    private function resolveSummary(array $payload, ?MonitoredNode $node): array
+    {
+        $summaryFromPayload = $payload['summary'] ?? null;
+        if (is_array($summaryFromPayload)) {
+            return $summaryFromPayload;
+        }
+
+        $summaryFromNode = $node?->last_summary_json;
+        return is_array($summaryFromNode) ? $summaryFromNode : [];
+    }
+
+    private function buildServiceDetailLines(array $summary): array
+    {
+        $services = $summary['services']['list'] ?? [];
+        if (! is_array($services)) {
+            $services = [];
+        }
+
+        $grouped = [
+            'online' => [],
+            'degraded' => [],
+            'down' => [],
+            'unknown' => [],
+        ];
+
+        foreach ($services as $service) {
+            if (! is_array($service)) {
+                continue;
+            }
+
+            $name = trim((string) ($service['name'] ?? 'unknown-service'));
+            if ($name === '') {
+                $name = 'unknown-service';
+            }
+
+            $bucket = $this->normalizeServiceBucket((string) ($service['status'] ?? 'unknown'));
+            $grouped[$bucket][] = $name;
+        }
+
+        $total = count($services);
+        if ($total === 0) {
+            return ['Services: no service list in latest payload'];
+        }
+
+        return [
+            sprintf(
+                'Services: total=%d, online=%d, degraded=%d, down=%d, unknown=%d',
+                $total,
+                count($grouped['online']),
+                count($grouped['degraded']),
+                count($grouped['down']),
+                count($grouped['unknown'])
+            ),
+            'Online Services: '.$this->formatServiceNames($grouped['online']),
+            'Degraded Services: '.$this->formatServiceNames($grouped['degraded']),
+            'Down Services: '.$this->formatServiceNames($grouped['down']),
+            'Unknown Services: '.$this->formatServiceNames($grouped['unknown']),
+        ];
+    }
+
+    private function buildProblemLines(array $summary): array
+    {
+        $problems = $summary['problems'] ?? [];
+        if (! is_array($problems) || count($problems) === 0) {
+            return ['Problems: none'];
+        }
+
+        $lines = ['Problems:'];
+        $max = 5;
+
+        foreach (array_slice($problems, 0, $max) as $problem) {
+            if (! is_array($problem)) {
+                continue;
+            }
+
+            $type = trim((string) ($problem['type'] ?? 'unknown'));
+            $target = trim((string) ($problem['target'] ?? 'unknown'));
+            $reason = trim((string) ($problem['reason'] ?? 'n/a'));
+
+            $lines[] = sprintf('- [%s] %s: %s', $type, $target, $reason);
+        }
+
+        if (count($problems) > $max) {
+            $lines[] = sprintf('- and %d more problem(s)', count($problems) - $max);
+        }
+
+        return $lines;
+    }
+
+    private function normalizeServiceBucket(string $status): string
+    {
+        return match (strtolower(trim($status))) {
+            'online', 'ok', 'running', 'healthy' => 'online',
+            'degraded', 'warning' => 'degraded',
+            'down', 'stopped', 'errored', 'offline' => 'down',
+            default => 'unknown',
+        };
+    }
+
+    private function formatServiceNames(array $names): string
+    {
+        if (count($names) === 0) {
+            return '-';
+        }
+
+        $max = 8;
+        $sliced = array_slice($names, 0, $max);
+        $value = implode(', ', $sliced);
+
+        if (count($names) > $max) {
+            $value .= sprintf(' (+%d more)', count($names) - $max);
+        }
+
+        return $value;
     }
 
     private function postDiscordMessage(string $content): void
