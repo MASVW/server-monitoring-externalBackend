@@ -53,6 +53,8 @@ class TimeoutCheckerService
                 }
 
                 $previousStatus = $node->current_status;
+                $serverName = $this->resolveServerName($node);
+                $undetectedMessage = $this->buildUndetectedMessage($serverName);
 
                 $node->fill([
                     'current_status' => 'down',
@@ -64,11 +66,12 @@ class TimeoutCheckerService
                     'from_status' => $previousStatus,
                     'to_status' => $transition['to_status'],
                     'event_type' => $transition['event_type'],
-                    'message' => $transition['message']." ({$elapsedSeconds}s > {$thresholdSeconds}s)",
+                    'message' => $undetectedMessage,
                     'metadata_json' => [
                         'source' => 'timeout_checker',
                         'elapsed_seconds' => $elapsedSeconds,
                         'threshold_seconds' => $thresholdSeconds,
+                        'server_name' => $serverName,
                     ],
                     'occurred_at' => $now,
                 ]);
@@ -79,7 +82,8 @@ class TimeoutCheckerService
                     'from_status' => $previousStatus,
                     'to_status' => $transition['to_status'],
                     'event_type' => $transition['event_type'],
-                    'message' => $transition['message'],
+                    'message' => $undetectedMessage,
+                    'server_name' => $serverName,
                 ];
             });
 
@@ -100,5 +104,35 @@ class TimeoutCheckerService
         }
 
         return $result;
+    }
+
+    private function resolveServerName(MonitoredNode $node): string
+    {
+        $payload = is_array($node->last_payload_json) ? $node->last_payload_json : [];
+
+        $candidates = [
+            data_get($payload, 'server_name'),
+            data_get($payload, 'node_name'),
+            data_get($payload, 'host.hostname'),
+            $node->name,
+            $node->node_id,
+        ];
+
+        foreach ($candidates as $candidate) {
+            $value = trim((string) $candidate);
+            if ($value !== '') {
+                return $value;
+            }
+        }
+
+        return $node->node_id;
+    }
+
+    private function buildUndetectedMessage(string $serverName): string
+    {
+        return sprintf(
+            'Tidak ditemukan informasi %s. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.',
+            $serverName
+        );
     }
 }

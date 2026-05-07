@@ -297,9 +297,13 @@ class WhatsAppAlertService
     private function buildInitialAlertMessage(array $context): string
     {
         $status = strtoupper((string) $context['status']);
+        $incidentMessage = $this->resolveIncidentMessage($context);
 
         $sections = [
             '🚨 *SERVER MONITORING ALERT — '.$status.'*',
+            '',
+            '⚠️ *Keterangan*',
+            $incidentMessage,
             '',
             $this->buildNodeSection($context),
             '',
@@ -324,6 +328,7 @@ class WhatsAppAlertService
     {
         $status = strtoupper((string) $context['status']);
         $incidentStartedAt = $context['incident_started_at'] ?? null;
+        $incidentMessage = $this->resolveIncidentMessage($context);
 
         $duration = '-';
         if ($incidentStartedAt !== null) {
@@ -341,6 +346,9 @@ class WhatsAppAlertService
             '🔁 *SERVER MONITORING REMINDER — MASIH '.$status.'*',
             '',
             'Node *'.($context['node_id'] ?? 'unknown').'* masih berada dalam kondisi tidak normal.',
+            '',
+            '⚠️ *Keterangan*',
+            $incidentMessage,
             '',
             '🖥️ *Node*',
             '• ID: '.($context['node_id'] ?? 'unknown'),
@@ -1010,13 +1018,19 @@ class WhatsAppAlertService
     private function buildContextFromNode(MonitoredNode $node): array
     {
         $summary = is_array($node->last_summary_json) ? $node->last_summary_json : [];
+        $serverName = $this->resolveServerNameFromNode($node, $summary);
+        $status = $this->normalizeServiceBucket((string) $node->current_status);
 
         return $this->prepareContext([
             'node_id' => $node->node_id,
-            'status' => (string) $node->current_status,
+            'server_name' => $serverName,
+            'status' => $status,
             'summary' => $summary,
             'timeout_threshold_seconds' => $node->timeout_threshold_seconds,
             'last_heartbeat_at' => $node->last_heartbeat_at,
+            'message' => in_array($status, ['down', 'unknown'], true)
+                ? $this->buildUndetectedMessage($serverName)
+                : null,
         ]);
     }
 
@@ -1038,6 +1052,7 @@ class WhatsAppAlertService
 
         return array_merge($context, [
             'node_id' => $nodeId !== '' ? $nodeId : 'unknown',
+            'server_name' => trim((string) ($context['server_name'] ?? '')),
             'status' => $status,
             'previous_status' => $previousStatus,
             'summary' => $summary,
@@ -1071,6 +1086,57 @@ class WhatsAppAlertService
     private function incidentKey(string $nodeId): string
     {
         return 'node:'.$nodeId;
+    }
+
+    private function resolveIncidentMessage(array $context): string
+    {
+        $message = trim((string) ($context['message'] ?? ''));
+        if ($message !== '') {
+            return $message;
+        }
+
+        if (! in_array((string) ($context['status'] ?? 'unknown'), ['down', 'unknown'], true)) {
+            return '-';
+        }
+
+        $serverName = trim((string) ($context['server_name'] ?? ''));
+        if ($serverName === '') {
+            $serverName = trim((string) ($context['node_id'] ?? 'unknown'));
+        }
+
+        return $this->buildUndetectedMessage($serverName);
+    }
+
+    private function resolveServerNameFromNode(MonitoredNode $node, array $summary): string
+    {
+        $payload = is_array($node->last_payload_json) ? $node->last_payload_json : [];
+        $host = is_array(data_get($summary, 'host')) ? data_get($summary, 'host') : [];
+
+        $candidates = [
+            data_get($payload, 'server_name'),
+            data_get($payload, 'node_name'),
+            data_get($payload, 'host.hostname'),
+            data_get($host, 'hostname'),
+            $node->name,
+            $node->node_id,
+        ];
+
+        foreach ($candidates as $candidate) {
+            $value = trim((string) $candidate);
+            if ($value !== '') {
+                return $value;
+            }
+        }
+
+        return $node->node_id;
+    }
+
+    private function buildUndetectedMessage(string $serverName): string
+    {
+        return sprintf(
+            'Tidak ditemukan informasi %s. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.',
+            $serverName
+        );
     }
 
     private function getStateForUpdate(string $nodeId): ?MonitoringAlertState

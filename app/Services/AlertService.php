@@ -111,6 +111,8 @@ class AlertService
     {
         $status = $this->normalizeServiceBucket((string) ($payload['to_status'] ?? $node?->current_status ?? 'unknown'));
         $nodeId = (string) ($payload['node_id'] ?? $node?->node_id ?? 'unknown');
+        $incidentMessage = $this->resolveIncidentMessage($payload, $node, $summary, $status);
+        $eventType = strtolower(trim((string) ($payload['event_type'] ?? '')));
 
         $serviceSummary = $this->summarizeServices($summary);
         $unhealthyCount = (int) ($serviceSummary['potential_unhealthy'] ?? 0);
@@ -118,6 +120,9 @@ class AlertService
         $description = $unhealthyCount > 0
             ? sprintf('%d service terdeteksi tidak sehat pada node %s.', $unhealthyCount, $nodeId)
             : sprintf('Node %s berada pada status %s dan membutuhkan pengecekan.', $nodeId, $status);
+        if ($eventType === 'timeout_detected' && $incidentMessage !== null) {
+            $description = $incidentMessage;
+        }
 
         $fields = [
             $this->buildNodeField(
@@ -127,6 +132,7 @@ class AlertService
                 summary: $summary,
                 lastHeartbeat: $payload['last_heartbeat_at'] ?? $node?->last_heartbeat_at
             ),
+            $this->buildIncidentMessageField($incidentMessage),
             $this->buildConditionField($serviceSummary),
             $this->buildProblemServicesField($serviceSummary),
             $this->buildNormalServicesField($serviceSummary),
@@ -156,10 +162,16 @@ class AlertService
         $status = $this->normalizeServiceBucket((string) ($node->current_status ?? 'unknown'));
         $serviceSummary = $this->summarizeServices($summary);
         $unhealthyCount = (int) ($serviceSummary['potential_unhealthy'] ?? 0);
+        $incidentMessage = $status === 'down'
+            ? $this->buildUndetectedMessage($this->resolveServerName([], $node, $summary, $node->node_id))
+            : null;
 
         $description = $unhealthyCount > 0
             ? sprintf('%d service masih belum sehat pada node %s.', $unhealthyCount, $node->node_id)
             : sprintf('Node %s berada pada status %s dan membutuhkan pengecekan.', $node->node_id, $status);
+        if ($incidentMessage !== null) {
+            $description = $incidentMessage;
+        }
 
         $fields = [
             $this->buildNodeField(
@@ -169,6 +181,7 @@ class AlertService
                 summary: $summary,
                 lastHeartbeat: $node->last_heartbeat_at
             ),
+            $this->buildIncidentMessageField($incidentMessage),
             $this->buildConditionField($serviceSummary),
             $this->buildProblemServicesField($serviceSummary),
             $this->buildNormalServicesField($serviceSummary),
@@ -526,6 +539,20 @@ class AlertService
 
         return [
             'name' => '🟢 Layanan Normal',
+            'value' => $this->clipFieldValue($value),
+            'inline' => false,
+        ];
+    }
+
+    private function buildIncidentMessageField(?string $message): array
+    {
+        $value = trim((string) $message);
+        if ($value === '') {
+            $value = '-';
+        }
+
+        return [
+            'name' => '⚠️ Keterangan',
             'value' => $this->clipFieldValue($value),
             'inline' => false,
         ];
@@ -906,16 +933,23 @@ class AlertService
     private function dispatchWhatsAppForTransition(array $payload, ?MonitoredNode $node, array $summary): array
     {
         $status = $this->normalizeNodeStatusForIncident((string) ($payload['to_status'] ?? $node?->current_status ?? 'unknown'));
+        $nodeId = (string) ($payload['node_id'] ?? $node?->node_id ?? 'unknown');
+        $serverName = $this->resolveServerName($payload, $node, $summary, $nodeId);
+        $message = trim((string) ($payload['message'] ?? ''));
+        if ($message === '' && in_array($status, ['down', 'unknown'], true)) {
+            $message = $this->buildUndetectedMessage($serverName);
+        }
 
         $context = [
-            'node_id' => (string) ($payload['node_id'] ?? $node?->node_id ?? 'unknown'),
+            'node_id' => $nodeId,
+            'server_name' => $serverName,
             'status' => $status,
             'previous_status' => (string) ($payload['from_status'] ?? 'unknown'),
             'summary' => $summary,
             'timeout_threshold_seconds' => (int) ($node?->timeout_threshold_seconds ?? 180),
             'last_heartbeat_at' => $node?->last_heartbeat_at,
             'event_type' => (string) ($payload['event_type'] ?? 'unknown'),
-            'message' => (string) ($payload['message'] ?? ''),
+            'message' => $message,
         ];
 
         if (in_array($status, ['down', 'degraded'], true)) {
@@ -937,5 +971,57 @@ class AlertService
             'down', 'offline', 'errored', 'stopped' => 'down',
             default => 'unknown',
         };
+    }
+
+    private function resolveIncidentMessage(array $payload, ?MonitoredNode $node, array $summary, string $status): ?string
+    {
+        $message = trim((string) ($payload['message'] ?? ''));
+        if ($message !== '') {
+            return $message;
+        }
+
+        if (! in_array($status, ['down', 'unknown'], true)) {
+            return null;
+        }
+
+        $nodeId = (string) ($payload['node_id'] ?? $node?->node_id ?? 'unknown');
+        $serverName = $this->resolveServerName($payload, $node, $summary, $nodeId);
+
+        return $this->buildUndetectedMessage($serverName);
+    }
+
+    private function resolveServerName(array $payload, ?MonitoredNode $node, array $summary, string $fallbackNodeId): string
+    {
+        $storedPayload = is_array($node?->last_payload_json) ? $node->last_payload_json : [];
+        $host = is_array($summary['host'] ?? null) ? $summary['host'] : [];
+
+        $candidates = [
+            data_get($payload, 'server_name'),
+            data_get($payload, 'node_name'),
+            data_get($payload, 'host.hostname'),
+            data_get($host, 'hostname'),
+            data_get($storedPayload, 'server_name'),
+            data_get($storedPayload, 'node_name'),
+            data_get($storedPayload, 'host.hostname'),
+            $node?->name,
+            $fallbackNodeId,
+        ];
+
+        foreach ($candidates as $candidate) {
+            $value = trim((string) $candidate);
+            if ($value !== '') {
+                return $value;
+            }
+        }
+
+        return $fallbackNodeId !== '' ? $fallbackNodeId : 'unknown';
+    }
+
+    private function buildUndetectedMessage(string $serverName): string
+    {
+        return sprintf(
+            'Tidak ditemukan informasi %s. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.',
+            $serverName
+        );
     }
 }
