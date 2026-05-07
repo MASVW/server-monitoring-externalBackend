@@ -82,16 +82,21 @@ class HeartbeatApiTest extends TestCase
         $status->assertStatus(200)
             ->assertJsonPath('success', true)
             ->assertJsonPath('data.node_id', 'node-01')
+            ->assertJsonPath('data.server_name', 'node-01')
+            ->assertJsonPath('data.status', 'degraded')
             ->assertJsonPath('data.current_status', 'degraded')
             ->assertJsonStructure([
                 'success',
                 'message',
                 'data' => [
                     'node_id',
+                    'server_name',
+                    'status',
                     'current_status',
                     'last_heartbeat_at',
                     'heartbeat_interval_seconds',
                     'timeout_threshold_seconds',
+                    'message',
                     'summary',
                 ],
             ]);
@@ -141,5 +146,73 @@ class HeartbeatApiTest extends TestCase
             'status' => 'unknown',
             'signature_valid' => 0,
         ]);
+    }
+
+    public function test_status_endpoint_returns_unknown_when_last_heartbeat_is_null(): void
+    {
+        MonitoredNode::query()->create([
+            'node_id' => 'node-unknown',
+            'name' => 'Node Internal A',
+            'current_status' => 'ok',
+            'last_heartbeat_at' => null,
+            'timeout_threshold_seconds' => 180,
+        ]);
+
+        $response = $this->getJson('/api/v1/status/node-unknown');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.server_name', 'Node Internal A')
+            ->assertJsonPath('data.status', 'unknown')
+            ->assertJsonPath(
+                'data.message',
+                'Tidak ditemukan informasi Node Internal A. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.'
+            );
+    }
+
+    public function test_status_endpoint_returns_unknown_when_heartbeat_is_stale(): void
+    {
+        MonitoredNode::query()->create([
+            'node_id' => 'node-stale',
+            'name' => 'Server Produksi 1',
+            'current_status' => 'ok',
+            'last_heartbeat_at' => now('UTC')->subMinutes(10),
+            'timeout_threshold_seconds' => 180,
+        ]);
+
+        $response = $this->getJson('/api/v1/status/node-stale');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.server_name', 'Server Produksi 1')
+            ->assertJsonPath('data.status', 'unknown')
+            ->assertJsonPath(
+                'data.message',
+                'Tidak ditemukan informasi Server Produksi 1. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.'
+            );
+    }
+
+    public function test_status_endpoint_uses_dynamic_name_from_payload_when_available(): void
+    {
+        MonitoredNode::query()->create([
+            'node_id' => 'node-dynamic',
+            'name' => 'Fallback Name',
+            'current_status' => 'unknown',
+            'last_heartbeat_at' => null,
+            'timeout_threshold_seconds' => 180,
+            'last_payload_json' => [
+                'server_name' => 'Node-Region-JKT-01',
+            ],
+        ]);
+
+        $response = $this->getJson('/api/v1/status/node-dynamic');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.server_name', 'Node-Region-JKT-01')
+            ->assertJsonPath(
+                'data.message',
+                'Tidak ditemukan informasi Node-Region-JKT-01. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.'
+            );
     }
 }
