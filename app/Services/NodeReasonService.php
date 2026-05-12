@@ -15,21 +15,28 @@ class NodeReasonService
         $candidates = [
             data_get($payload, 'server_name'),
             data_get($payload, 'node_name'),
-            data_get($payload, 'host.hostname'),
-            data_get($host, 'hostname'),
-            data_get($storedPayload, 'server_name'),
-            data_get($storedPayload, 'node_name'),
-            data_get($storedPayload, 'host.hostname'),
             $node?->name,
+            data_get($payload, 'node_id'),
             $fallbackNodeId,
             $node?->node_id,
+            data_get($storedPayload, 'server_name'),
+            data_get($storedPayload, 'node_name'),
+            data_get($storedPayload, 'node_id'),
+            data_get($payload, 'host.hostname'),
+            data_get($host, 'hostname'),
+            data_get($storedPayload, 'host.hostname'),
         ];
 
         foreach ($candidates as $candidate) {
             $value = trim((string) $candidate);
-            if ($value !== '') {
+            if ($this->isUsableServerName($value)) {
                 return $value;
             }
+        }
+
+        $fallbackValue = trim((string) ($fallbackNodeId ?: $node?->node_id ?: ''));
+        if ($this->isUsableServerName($fallbackValue)) {
+            return $fallbackValue;
         }
 
         return 'unknown';
@@ -122,5 +129,19 @@ class NodeReasonService
             default => 'unknown',
         };
     }
-}
 
+    private function isUsableServerName(string $value): bool
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return false;
+        }
+
+        $normalized = mb_strtolower($trimmed);
+        if (in_array($normalized, ['-', 'n/a', 'unknown', 'unnamed node', 'unnamed-node'], true)) {
+            return false;
+        }
+
+        return true;
+    }
+}
