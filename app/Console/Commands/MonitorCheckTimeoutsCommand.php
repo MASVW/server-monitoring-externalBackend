@@ -10,7 +10,7 @@ class MonitorCheckTimeoutsCommand extends Command
 {
     protected $signature = 'monitor:check-timeouts';
 
-    protected $description = 'Check monitored nodes and mark down on heartbeat timeout';
+    protected $description = 'Check monitored nodes via heartbeat timeout and internal domain probe';
 
     public function __construct(
         private readonly TimeoutCheckerService $timeoutCheckerService,
@@ -41,9 +41,12 @@ class MonitorCheckTimeoutsCommand extends Command
         Cache::forever($cacheKey, time());
 
         $this->info(sprintf(
-            '[timeout-checker] checked=%d marked_down=%d at=%s',
+            '[timeout-checker] checked=%d probe_checked=%d marked_down=%d isp_degraded=%d isp_recovered=%d at=%s',
             $result['checked'],
+            (int) ($result['probe_checked'] ?? 0),
             $result['marked_down'],
+            (int) ($result['isp_degraded'] ?? 0),
+            (int) ($result['isp_recovered'] ?? 0),
             now('UTC')->format('Y-m-d\\TH:i:s.v\\Z')
         ));
 

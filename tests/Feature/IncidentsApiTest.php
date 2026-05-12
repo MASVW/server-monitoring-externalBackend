@@ -17,6 +17,9 @@ class IncidentsApiTest extends TestCase
 
         config()->set('heartbeat.hmac_secret', 'test-secret');
         config()->set('heartbeat.allowed_drift_seconds', 300);
+        config()->set('monitoring.internal_probe_url_map', [
+            'node-01' => 'https://internal.example/health',
+        ]);
     }
 
     public function test_lists_incidents_with_pagination_and_filters(): void

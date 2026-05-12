@@ -32,6 +32,7 @@ class AlertService
     private const MAX_EMBED_FOOTER_CHARS = 2048;
 
     public function __construct(
+        private readonly NodeReasonService $nodeReasonService,
         private readonly WhatsAppAlertService $whatsAppAlertService,
     ) {}
 
@@ -111,7 +112,8 @@ class AlertService
     {
         $status = $this->normalizeServiceBucket((string) ($payload['to_status'] ?? $node?->current_status ?? 'unknown'));
         $nodeId = (string) ($payload['node_id'] ?? $node?->node_id ?? 'unknown');
-        $incidentMessage = $this->resolveIncidentMessage($payload, $node, $summary, $status);
+        $reasonCode = $this->resolveReasonCode($payload, $node);
+        $incidentMessage = $this->resolveIncidentMessage($payload, $node, $summary, $status, $reasonCode);
         $eventType = strtolower(trim((string) ($payload['event_type'] ?? '')));
 
         $serviceSummary = $this->summarizeServices($summary);
@@ -120,7 +122,12 @@ class AlertService
         $description = $unhealthyCount > 0
             ? sprintf('%d service terdeteksi tidak sehat pada node %s.', $unhealthyCount, $nodeId)
             : sprintf('Node %s berada pada status %s dan membutuhkan pengecekan.', $nodeId, $status);
-        if ($eventType === 'timeout_detected' && $incidentMessage !== null) {
+        if ($reasonCode === 'isp_down') {
+            $description = sprintf(
+                'Heartbeat diterima dari node %s, namun domain internal tidak reachable dari external.',
+                $nodeId
+            );
+        } elseif ($eventType === 'timeout_detected' && $incidentMessage !== null) {
             $description = $incidentMessage;
         }
 
@@ -133,6 +140,7 @@ class AlertService
                 lastHeartbeat: $payload['last_heartbeat_at'] ?? $node?->last_heartbeat_at
             ),
             $this->buildIncidentMessageField($incidentMessage),
+            $this->buildConnectivityField($payload, $node),
             $this->buildConditionField($serviceSummary),
             $this->buildProblemServicesField($serviceSummary),
             $this->buildNormalServicesField($serviceSummary),
@@ -162,14 +170,24 @@ class AlertService
         $status = $this->normalizeServiceBucket((string) ($node->current_status ?? 'unknown'));
         $serviceSummary = $this->summarizeServices($summary);
         $unhealthyCount = (int) ($serviceSummary['potential_unhealthy'] ?? 0);
-        $incidentMessage = $status === 'down'
-            ? $this->buildUndetectedMessage($this->resolveServerName([], $node, $summary, $node->node_id))
-            : null;
+        $reasonCode = $this->nodeReasonService->normalizeReasonCode((string) ($node->reason_code ?? 'unknown'));
+        $incidentMessage = $this->resolveIncidentMessage(
+            ['reason_code' => $reasonCode],
+            $node,
+            $summary,
+            $status,
+            $reasonCode
+        );
 
         $description = $unhealthyCount > 0
             ? sprintf('%d service masih belum sehat pada node %s.', $unhealthyCount, $node->node_id)
             : sprintf('Node %s berada pada status %s dan membutuhkan pengecekan.', $node->node_id, $status);
-        if ($incidentMessage !== null) {
+        if ($reasonCode === 'isp_down') {
+            $description = sprintf(
+                'Heartbeat diterima dari node %s, namun domain internal masih belum reachable dari external.',
+                $node->node_id
+            );
+        } elseif ($incidentMessage !== null) {
             $description = $incidentMessage;
         }
 
@@ -182,6 +200,7 @@ class AlertService
                 lastHeartbeat: $node->last_heartbeat_at
             ),
             $this->buildIncidentMessageField($incidentMessage),
+            $this->buildConnectivityField([], $node),
             $this->buildConditionField($serviceSummary),
             $this->buildProblemServicesField($serviceSummary),
             $this->buildNormalServicesField($serviceSummary),
@@ -553,6 +572,33 @@ class AlertService
 
         return [
             'name' => '⚠️ Keterangan',
+            'value' => $this->clipFieldValue($value),
+            'inline' => false,
+        ];
+    }
+
+    private function buildConnectivityField(array $payload, ?MonitoredNode $node): array
+    {
+        $connectivity = $this->resolveConnectivity($payload, $node);
+        $probeState = strtolower(trim((string) ($connectivity['state'] ?? 'unknown')));
+        $probeStateLabel = match ($probeState) {
+            'reachable' => '🟢 REACHABLE',
+            'unreachable' => '🔴 UNREACHABLE',
+            'unconfigured' => '⚪ UNCONFIGURED',
+            default => '⚪ UNKNOWN',
+        };
+
+        $value = implode("\n", [
+            '• Probe URL: '.($connectivity['probe_url'] ?: '-'),
+            '• State: '.$probeStateLabel,
+            '• Fail Count: '.(int) ($connectivity['fail_count'] ?? 0).' / '.(int) ($connectivity['failure_threshold'] ?? 0),
+            '• Last Checked: '.$this->formatHumanWibDateTime($connectivity['last_checked_at'] ?? null),
+            '• Last OK: '.$this->formatHumanWibDateTime($connectivity['last_ok_at'] ?? null),
+            '• Last Error: '.(trim((string) ($connectivity['last_error'] ?? '')) ?: '-'),
+        ]);
+
+        return [
+            'name' => '🌐 Connectivity Probe',
             'value' => $this->clipFieldValue($value),
             'inline' => false,
         ];
@@ -934,22 +980,23 @@ class AlertService
     {
         $status = $this->normalizeNodeStatusForIncident((string) ($payload['to_status'] ?? $node?->current_status ?? 'unknown'));
         $nodeId = (string) ($payload['node_id'] ?? $node?->node_id ?? 'unknown');
-        $serverName = $this->resolveServerName($payload, $node, $summary, $nodeId);
-        $message = trim((string) ($payload['message'] ?? ''));
-        if ($message === '' && in_array($status, ['down', 'unknown'], true)) {
-            $message = $this->buildUndetectedMessage($serverName);
-        }
+        $serverName = $this->nodeReasonService->resolveServerName($node, $payload, $summary, $nodeId);
+        $reasonCode = $this->resolveReasonCode($payload, $node);
+        $message = trim((string) ($payload['message'] ?? $this->nodeReasonService->buildReasonMessage($reasonCode, $serverName)));
+        $connectivity = $this->resolveConnectivity($payload, $node);
 
         $context = [
             'node_id' => $nodeId,
             'server_name' => $serverName,
             'status' => $status,
             'previous_status' => (string) ($payload['from_status'] ?? 'unknown'),
+            'reason_code' => $reasonCode,
             'summary' => $summary,
             'timeout_threshold_seconds' => (int) ($node?->timeout_threshold_seconds ?? 180),
             'last_heartbeat_at' => $node?->last_heartbeat_at,
             'event_type' => (string) ($payload['event_type'] ?? 'unknown'),
             'message' => $message,
+            'connectivity' => $connectivity,
         ];
 
         if (in_array($status, ['down', 'degraded'], true)) {
@@ -965,63 +1012,70 @@ class AlertService
 
     private function normalizeNodeStatusForIncident(string $status): string
     {
-        return match (strtolower(trim($status))) {
-            'ok', 'online', 'healthy', 'running' => 'ok',
-            'degraded', 'warning' => 'degraded',
-            'down', 'offline', 'errored', 'stopped' => 'down',
-            default => 'unknown',
-        };
+        return $this->nodeReasonService->normalizeNodeStatus($status);
     }
 
-    private function resolveIncidentMessage(array $payload, ?MonitoredNode $node, array $summary, string $status): ?string
+    private function resolveIncidentMessage(
+        array $payload,
+        ?MonitoredNode $node,
+        array $summary,
+        string $status,
+        ?string $reasonCode = null
+    ): ?string
     {
         $message = trim((string) ($payload['message'] ?? ''));
         if ($message !== '') {
             return $message;
         }
 
-        if (! in_array($status, ['down', 'unknown'], true)) {
+        $normalizedReasonCode = $this->nodeReasonService->normalizeReasonCode(
+            $reasonCode ?? (string) ($payload['reason_code'] ?? $node?->reason_code ?? 'unknown')
+        );
+
+        if ($normalizedReasonCode === 'unknown' && ! in_array($status, ['down', 'unknown'], true)) {
             return null;
         }
 
         $nodeId = (string) ($payload['node_id'] ?? $node?->node_id ?? 'unknown');
-        $serverName = $this->resolveServerName($payload, $node, $summary, $nodeId);
+        $serverName = $this->nodeReasonService->resolveServerName($node, $payload, $summary, $nodeId);
 
-        return $this->buildUndetectedMessage($serverName);
+        return $this->nodeReasonService->buildReasonMessage($normalizedReasonCode, $serverName);
     }
 
-    private function resolveServerName(array $payload, ?MonitoredNode $node, array $summary, string $fallbackNodeId): string
+    private function resolveReasonCode(array $payload, ?MonitoredNode $node): string
     {
-        $storedPayload = is_array($node?->last_payload_json) ? $node->last_payload_json : [];
-        $host = is_array($summary['host'] ?? null) ? $summary['host'] : [];
+        return $this->nodeReasonService->normalizeReasonCode(
+            (string) ($payload['reason_code'] ?? $node?->reason_code ?? 'unknown')
+        );
+    }
 
-        $candidates = [
-            data_get($payload, 'server_name'),
-            data_get($payload, 'node_name'),
-            data_get($payload, 'host.hostname'),
-            data_get($host, 'hostname'),
-            data_get($storedPayload, 'server_name'),
-            data_get($storedPayload, 'node_name'),
-            data_get($storedPayload, 'host.hostname'),
-            $node?->name,
-            $fallbackNodeId,
-        ];
-
-        foreach ($candidates as $candidate) {
-            $value = trim((string) $candidate);
-            if ($value !== '') {
-                return $value;
-            }
+    private function resolveConnectivity(array $payload, ?MonitoredNode $node): array
+    {
+        $candidate = $payload['connectivity'] ?? null;
+        if (is_array($candidate)) {
+            return [
+                'probe_url' => trim((string) ($candidate['probe_url'] ?? '')),
+                'state' => trim((string) ($candidate['state'] ?? 'unknown')),
+                'fail_count' => (int) ($candidate['fail_count'] ?? 0),
+                'failure_threshold' => (int) ($candidate['failure_threshold'] ?? $this->nodeReasonService->probeFailureThreshold()),
+                'last_checked_at' => $candidate['last_checked_at'] ?? null,
+                'last_ok_at' => $candidate['last_ok_at'] ?? null,
+                'last_error' => $candidate['last_error'] ?? null,
+            ];
         }
 
-        return $fallbackNodeId !== '' ? $fallbackNodeId : 'unknown';
-    }
+        if ($node === null) {
+            return [
+                'probe_url' => '',
+                'state' => 'unknown',
+                'fail_count' => 0,
+                'failure_threshold' => $this->nodeReasonService->probeFailureThreshold(),
+                'last_checked_at' => null,
+                'last_ok_at' => null,
+                'last_error' => null,
+            ];
+        }
 
-    private function buildUndetectedMessage(string $serverName): string
-    {
-        return sprintf(
-            'Tidak ditemukan informasi %s. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.',
-            $serverName
-        );
+        return $this->nodeReasonService->connectivityFromNode($node);
     }
 }

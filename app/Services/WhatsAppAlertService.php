@@ -12,6 +12,10 @@ use Illuminate\Support\Facades\Log;
 
 class WhatsAppAlertService
 {
+    public function __construct(
+        private readonly NodeReasonService $nodeReasonService,
+    ) {}
+
     public function isConfigured(): bool
     {
         if (! $this->isEnabled()) {
@@ -193,7 +197,7 @@ class WhatsAppAlertService
         }
 
         $prepared['status'] = 'ok';
-        $prepared['previous_status'] = $this->normalizeServiceBucket((string) $state->current_status);
+        $prepared['previous_status'] = $this->nodeReasonService->normalizeNodeStatus((string) $state->current_status);
         $prepared['incident_started_at'] = $state->incident_started_at;
         $prepared['recovery_time'] = $now;
 
@@ -305,6 +309,8 @@ class WhatsAppAlertService
             '⚠️ *Keterangan*',
             $incidentMessage,
             '',
+            $this->buildConnectivitySection($context),
+            '',
             $this->buildNodeSection($context),
             '',
             $this->buildConditionSection($context),
@@ -349,6 +355,8 @@ class WhatsAppAlertService
             '',
             '⚠️ *Keterangan*',
             $incidentMessage,
+            '',
+            $this->buildConnectivitySection($context),
             '',
             '🖥️ *Node*',
             '• ID: '.($context['node_id'] ?? 'unknown'),
@@ -397,6 +405,11 @@ class WhatsAppAlertService
             '✅ *SERVER RECOVERY — NODE NORMAL*',
             '',
             'Node *'.($context['node_id'] ?? 'unknown').'* sudah kembali normal.',
+            '',
+            '⚠️ *Keterangan*',
+            $this->resolveRecoveryMessage($context),
+            '',
+            $this->buildConnectivitySection($context),
             '',
             '🖥️ *Node*',
             '• ID: '.($context['node_id'] ?? 'unknown'),
@@ -576,6 +589,31 @@ class WhatsAppAlertService
         return "📊 *Resource Server*\n".$this->resourceLines($context);
     }
 
+    private function buildConnectivitySection(array $context): string
+    {
+        $connectivity = is_array($context['connectivity'] ?? null) ? $context['connectivity'] : [];
+
+        $probeState = strtolower(trim((string) ($connectivity['state'] ?? 'unknown')));
+        $probeStateLabel = match ($probeState) {
+            'reachable' => '🟢 REACHABLE',
+            'unreachable' => '🔴 UNREACHABLE',
+            'unconfigured' => '⚪ UNCONFIGURED',
+            default => '⚪ UNKNOWN',
+        };
+
+        $lines = [
+            '🌐 *Connectivity Probe*',
+            '• Probe URL: '.(trim((string) ($connectivity['probe_url'] ?? '')) ?: '-'),
+            '• State: '.$probeStateLabel,
+            '• Fail Count: '.(int) ($connectivity['fail_count'] ?? 0).' / '.(int) ($connectivity['failure_threshold'] ?? 0),
+            '• Last Checked: '.$this->formatHumanWibDateTime($connectivity['last_checked_at'] ?? null),
+            '• Last OK: '.$this->formatHumanWibDateTime($connectivity['last_ok_at'] ?? null),
+            '• Last Error: '.(trim((string) ($connectivity['last_error'] ?? '')) ?: '-'),
+        ];
+
+        return implode("\n", $lines);
+    }
+
     private function resourceLines(array $context): string
     {
         $host = is_array(data_get($context, 'summary.host')) ? data_get($context, 'summary.host') : [];
@@ -666,6 +704,21 @@ class WhatsAppAlertService
         }
 
         return "✅ *Problems*\n".implode("\n", $lines);
+    }
+
+    private function resolveRecoveryMessage(array $context): string
+    {
+        $message = trim((string) ($context['message'] ?? ''));
+        if ($message !== '') {
+            return $message;
+        }
+
+        $serverName = trim((string) ($context['server_name'] ?? ''));
+        if ($serverName === '') {
+            $serverName = trim((string) ($context['node_id'] ?? 'unknown'));
+        }
+
+        return $this->nodeReasonService->buildIspRecoveredMessage($serverName);
     }
 
     private function clipMessage(string $message, int $max = 3500): string
@@ -1018,27 +1071,30 @@ class WhatsAppAlertService
     private function buildContextFromNode(MonitoredNode $node): array
     {
         $summary = is_array($node->last_summary_json) ? $node->last_summary_json : [];
-        $serverName = $this->resolveServerNameFromNode($node, $summary);
-        $status = $this->normalizeServiceBucket((string) $node->current_status);
+        $serverName = $this->nodeReasonService->resolveServerName($node, summary: $summary);
+        $status = $this->nodeReasonService->normalizeNodeStatus((string) $node->current_status);
+        $reasonCode = $this->nodeReasonService->normalizeReasonCode((string) ($node->reason_code ?? 'unknown'));
+        $connectivity = $this->nodeReasonService->connectivityFromNode($node);
 
         return $this->prepareContext([
             'node_id' => $node->node_id,
             'server_name' => $serverName,
             'status' => $status,
+            'reason_code' => $reasonCode,
             'summary' => $summary,
             'timeout_threshold_seconds' => $node->timeout_threshold_seconds,
             'last_heartbeat_at' => $node->last_heartbeat_at,
-            'message' => in_array($status, ['down', 'unknown'], true)
-                ? $this->buildUndetectedMessage($serverName)
-                : null,
+            'message' => $this->nodeReasonService->buildReasonMessage($reasonCode, $serverName),
+            'connectivity' => $connectivity,
         ]);
     }
 
     private function prepareContext(array $context): array
     {
         $nodeId = trim((string) ($context['node_id'] ?? 'unknown'));
-        $status = $this->normalizeServiceBucket((string) ($context['status'] ?? $context['to_status'] ?? 'unknown'));
-        $previousStatus = $this->normalizeServiceBucket((string) ($context['previous_status'] ?? $context['from_status'] ?? 'unknown'));
+        $status = $this->nodeReasonService->normalizeNodeStatus((string) ($context['status'] ?? $context['to_status'] ?? 'unknown'));
+        $previousStatus = $this->nodeReasonService->normalizeNodeStatus((string) ($context['previous_status'] ?? $context['from_status'] ?? 'unknown'));
+        $reasonCode = $this->nodeReasonService->normalizeReasonCode((string) ($context['reason_code'] ?? 'unknown'));
 
         $summary = $context['summary'] ?? null;
         if (! is_array($summary)) {
@@ -1055,10 +1111,12 @@ class WhatsAppAlertService
             'server_name' => trim((string) ($context['server_name'] ?? '')),
             'status' => $status,
             'previous_status' => $previousStatus,
+            'reason_code' => $reasonCode,
             'summary' => $summary,
             'service_summary' => $serviceSummary,
             'is_unhealthy' => $isUnhealthy,
             'timeout_threshold_seconds' => (int) ($context['timeout_threshold_seconds'] ?? 180),
+            'connectivity' => $this->normalizeConnectivity($context['connectivity'] ?? null, $nodeId),
         ]);
     }
 
@@ -1077,9 +1135,11 @@ class WhatsAppAlertService
             'node_id' => $context['node_id'] ?? 'unknown',
             'status' => $context['status'] ?? 'unknown',
             'previous_status' => $context['previous_status'] ?? 'unknown',
+            'reason_code' => $context['reason_code'] ?? 'unknown',
             'summary' => is_array($context['summary'] ?? null) ? $context['summary'] : [],
             'timeout_threshold_seconds' => (int) ($context['timeout_threshold_seconds'] ?? 180),
             'last_heartbeat_at' => $lastHeartbeatIso,
+            'connectivity' => $this->normalizeConnectivity($context['connectivity'] ?? null, (string) ($context['node_id'] ?? 'unknown')),
         ];
     }
 
@@ -1095,48 +1155,31 @@ class WhatsAppAlertService
             return $message;
         }
 
-        if (! in_array((string) ($context['status'] ?? 'unknown'), ['down', 'unknown'], true)) {
-            return '-';
-        }
+        $reasonCode = $this->nodeReasonService->normalizeReasonCode((string) ($context['reason_code'] ?? 'unknown'));
 
         $serverName = trim((string) ($context['server_name'] ?? ''));
         if ($serverName === '') {
             $serverName = trim((string) ($context['node_id'] ?? 'unknown'));
         }
 
-        return $this->buildUndetectedMessage($serverName);
+        return $this->nodeReasonService->buildReasonMessage($reasonCode, $serverName);
     }
 
-    private function resolveServerNameFromNode(MonitoredNode $node, array $summary): string
+    private function normalizeConnectivity(mixed $connectivity, string $nodeId): array
     {
-        $payload = is_array($node->last_payload_json) ? $node->last_payload_json : [];
-        $host = is_array(data_get($summary, 'host')) ? data_get($summary, 'host') : [];
-
-        $candidates = [
-            data_get($payload, 'server_name'),
-            data_get($payload, 'node_name'),
-            data_get($payload, 'host.hostname'),
-            data_get($host, 'hostname'),
-            $node->name,
-            $node->node_id,
-        ];
-
-        foreach ($candidates as $candidate) {
-            $value = trim((string) $candidate);
-            if ($value !== '') {
-                return $value;
-            }
+        if (! is_array($connectivity)) {
+            $connectivity = [];
         }
 
-        return $node->node_id;
-    }
-
-    private function buildUndetectedMessage(string $serverName): string
-    {
-        return sprintf(
-            'Tidak ditemukan informasi %s. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.',
-            $serverName
-        );
+        return [
+            'probe_url' => trim((string) ($connectivity['probe_url'] ?? $this->nodeReasonService->resolveProbeUrl($nodeId) ?? '')),
+            'state' => trim((string) ($connectivity['state'] ?? 'unknown')),
+            'fail_count' => (int) ($connectivity['fail_count'] ?? 0),
+            'failure_threshold' => (int) ($connectivity['failure_threshold'] ?? $this->nodeReasonService->probeFailureThreshold()),
+            'last_checked_at' => $connectivity['last_checked_at'] ?? null,
+            'last_ok_at' => $connectivity['last_ok_at'] ?? null,
+            'last_error' => $connectivity['last_error'] ?? null,
+        ];
     }
 
     private function getStateForUpdate(string $nodeId): ?MonitoringAlertState

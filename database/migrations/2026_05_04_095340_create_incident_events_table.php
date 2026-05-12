@@ -13,7 +13,15 @@ return new class extends Migration
             $table->string('node_id', 120);
             $table->enum('from_status', ['ok', 'degraded', 'down', 'unknown'])->nullable();
             $table->enum('to_status', ['ok', 'degraded', 'down', 'unknown']);
-            $table->enum('event_type', ['degraded', 'down', 'recovered', 'heartbeat_received', 'timeout_detected']);
+            $table->enum('event_type', [
+                'degraded',
+                'down',
+                'recovered',
+                'heartbeat_received',
+                'timeout_detected',
+                'isp_unreachable',
+                'isp_recovered',
+            ]);
             $table->string('message', 500);
             $table->json('metadata_json')->nullable();
             $table->timestamp('occurred_at');

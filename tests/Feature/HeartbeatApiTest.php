@@ -4,7 +4,9 @@ namespace Tests\Feature;
 
 use App\Models\HeartbeatEvent;
 use App\Models\MonitoredNode;
+use App\Services\TimeoutCheckerService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Tests\Concerns\SendsHeartbeatRequests;
 use Tests\TestCase;
 
@@ -19,6 +21,10 @@ class HeartbeatApiTest extends TestCase
 
         config()->set('heartbeat.hmac_secret', 'test-secret');
         config()->set('heartbeat.allowed_drift_seconds', 300);
+        config()->set('monitoring.internal_probe_url_map', [
+            'node-01' => 'https://internal.example/health',
+        ]);
+        config()->set('monitoring.internal_probe_failure_threshold', 2);
     }
 
     public function test_accepts_valid_signed_heartbeat(): void
@@ -96,7 +102,17 @@ class HeartbeatApiTest extends TestCase
                     'last_heartbeat_at',
                     'heartbeat_interval_seconds',
                     'timeout_threshold_seconds',
+                    'reason_code',
                     'message',
+                    'connectivity' => [
+                        'probe_url',
+                        'state',
+                        'fail_count',
+                        'failure_threshold',
+                        'last_checked_at',
+                        'last_ok_at',
+                        'last_error',
+                    ],
                     'summary',
                 ],
             ]);
@@ -148,12 +164,13 @@ class HeartbeatApiTest extends TestCase
         ]);
     }
 
-    public function test_status_endpoint_returns_unknown_when_last_heartbeat_is_null(): void
+    public function test_status_endpoint_returns_down_when_last_heartbeat_is_null(): void
     {
         MonitoredNode::query()->create([
             'node_id' => 'node-unknown',
             'name' => 'Node Internal A',
             'current_status' => 'ok',
+            'heartbeat_status' => 'ok',
             'last_heartbeat_at' => null,
             'timeout_threshold_seconds' => 180,
         ]);
@@ -163,19 +180,21 @@ class HeartbeatApiTest extends TestCase
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
             ->assertJsonPath('data.server_name', 'Node Internal A')
-            ->assertJsonPath('data.status', 'unknown')
+            ->assertJsonPath('data.status', 'down')
+            ->assertJsonPath('data.reason_code', 'heartbeat_timeout')
             ->assertJsonPath(
                 'data.message',
-                'Tidak ditemukan informasi Node Internal A. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.'
+                'Heartbeat Node Internal A tidak diterima dalam batas waktu. Server dinyatakan down.'
             );
     }
 
-    public function test_status_endpoint_returns_unknown_when_heartbeat_is_stale(): void
+    public function test_status_endpoint_returns_down_when_heartbeat_is_stale(): void
     {
         MonitoredNode::query()->create([
             'node_id' => 'node-stale',
             'name' => 'Server Produksi 1',
             'current_status' => 'ok',
+            'heartbeat_status' => 'ok',
             'last_heartbeat_at' => now('UTC')->subMinutes(10),
             'timeout_threshold_seconds' => 180,
         ]);
@@ -185,10 +204,11 @@ class HeartbeatApiTest extends TestCase
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
             ->assertJsonPath('data.server_name', 'Server Produksi 1')
-            ->assertJsonPath('data.status', 'unknown')
+            ->assertJsonPath('data.status', 'down')
+            ->assertJsonPath('data.reason_code', 'heartbeat_timeout')
             ->assertJsonPath(
                 'data.message',
-                'Tidak ditemukan informasi Server Produksi 1. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.'
+                'Heartbeat Server Produksi 1 tidak diterima dalam batas waktu. Server dinyatakan down.'
             );
     }
 
@@ -197,7 +217,8 @@ class HeartbeatApiTest extends TestCase
         MonitoredNode::query()->create([
             'node_id' => 'node-dynamic',
             'name' => 'Fallback Name',
-            'current_status' => 'unknown',
+            'current_status' => 'down',
+            'heartbeat_status' => 'ok',
             'last_heartbeat_at' => null,
             'timeout_threshold_seconds' => 180,
             'last_payload_json' => [
@@ -212,7 +233,53 @@ class HeartbeatApiTest extends TestCase
             ->assertJsonPath('data.server_name', 'Node-Region-JKT-01')
             ->assertJsonPath(
                 'data.message',
-                'Tidak ditemukan informasi Node-Region-JKT-01. Kemungkinan ISP down, server internal down, service heartbeat mati, atau external tidak menerima sinyal.'
+                'Heartbeat Node-Region-JKT-01 tidak diterima dalam batas waktu. Server dinyatakan down.'
             );
+    }
+
+    public function test_status_endpoint_returns_degraded_when_probe_not_configured(): void
+    {
+        config()->set('monitoring.internal_probe_url_map', []);
+
+        MonitoredNode::query()->create([
+            'node_id' => 'node-no-probe',
+            'name' => 'Node No Probe',
+            'current_status' => 'ok',
+            'heartbeat_status' => 'ok',
+            'last_heartbeat_at' => now('UTC'),
+            'timeout_threshold_seconds' => 180,
+        ]);
+
+        $response = $this->getJson('/api/v1/status/node-no-probe');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.status', 'degraded')
+            ->assertJsonPath('data.reason_code', 'probe_not_configured')
+            ->assertJsonPath(
+                'data.message',
+                'URL probe untuk Node No Probe belum dikonfigurasi di external monitoring.'
+            );
+    }
+
+    public function test_status_endpoint_returns_degraded_when_probe_failed_after_threshold(): void
+    {
+        Http::fake([
+            'https://internal.example/health' => Http::sequence()
+                ->pushStatus(503)
+                ->pushStatus(503),
+        ]);
+
+        $this->sendHeartbeat(payloadOverrides: ['overall_status' => 'ok'])->assertStatus(200);
+
+        app(TimeoutCheckerService::class)->checkTimeouts();
+        app(TimeoutCheckerService::class)->checkTimeouts();
+
+        $response = $this->getJson('/api/v1/status/node-01');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.status', 'degraded')
+            ->assertJsonPath('data.reason_code', 'isp_down')
+            ->assertJsonPath('data.connectivity.state', 'unreachable')
+            ->assertJsonPath('data.connectivity.fail_count', 2);
     }
 }
